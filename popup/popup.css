@@ -365,3 +365,8 @@ input[type="text"]:focus {
   text-align: center;
   padding: 6px 0;
 }
+
+/* 全局总开关徽标 */
+.status-badge.global {
+  color: var(--accent-color);
+}

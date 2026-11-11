@@ -2,6 +2,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const currentDomainEl = document.getElementById('currentDomain');
   const statusBadge = document.getElementById('statusBadge');
   const siteToggle = document.getElementById('siteToggle');
+  const globalToggle = document.getElementById('globalToggle');
   const totalBlockedCount = document.getElementById('totalBlockedCount');
   const totalRulesCount = document.getElementById('totalRulesCount');
   const ruleVersionEl = document.getElementById('ruleVersion');
@@ -26,13 +27,15 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // 2. 加载数据并渲染统计
   async function refreshUI() {
-    const data = await chrome.storage.local.get(['ruleConfig', 'siteConfigs', 'stats']);
+    const data = await chrome.storage.local.get(['ruleConfig', 'siteConfigs', 'stats', 'globalEnabled']);
     const config = data.ruleConfig || {};
     const configs = data.siteConfigs || {};
     const isWhitelisted = configs[hostname]?.whitelisted || false;
+    const globalOn = data.globalEnabled !== false;
 
-    siteToggle.checked = !isWhitelisted;
-    updateStatusBadge(!isWhitelisted);
+    if (globalToggle) globalToggle.checked = globalOn;
+    siteToggle.checked = !isWhitelisted && globalOn;
+    updateStatusBadge(!isWhitelisted && globalOn);
 
     if (config.version) ruleVersionEl.textContent = `v${config.version}`;
     if (config.remoteSyncUrl) syncUrlInput.value = config.remoteSyncUrl;
@@ -112,9 +115,41 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
+  // 向后台发送全局开关指令
+  function sendGlobalToggle(enabled) {
+    return new Promise(resolve => {
+      chrome.runtime.sendMessage({ action: 'SET_GLOBAL_ENABLED', enabled }, (res) => {
+        if (chrome.runtime.lastError) {
+          showMsg(`操作失败: ${chrome.runtime.lastError.message}`, 'error');
+          resolve(false);
+          return;
+        }
+        if (!res?.success) {
+          showMsg(`操作失败: ${res?.error || '未知错误'}`, 'error');
+          resolve(false);
+          return;
+        }
+        showMsg(enabled ? '已开启全局拦截' : '已暂停全局拦截', 'success');
+        resolve(true);
+      });
+    });
+  }
+
   await refreshUI();
 
-  // 5. 切换当前站点过滤状态
+  // 5. 切换全局拦截总开关
+  globalToggle?.addEventListener('change', async () => {
+    const enabled = globalToggle.checked;
+    const ok = await sendGlobalToggle(enabled);
+    if (!ok) {
+      if (globalToggle) globalToggle.checked = !enabled;
+      return;
+    }
+    await refreshUI();
+    if (tab?.id) chrome.tabs.reload(tab.id);
+  });
+
+  // 6. 切换当前站点过滤状态
   siteToggle.addEventListener('change', async () => {
     if (!hostname) return;
     const enabled = siteToggle.checked;
@@ -130,7 +165,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (tab?.id) chrome.tabs.reload(tab.id);
   });
 
-  // 6. 点击导入唤起隐藏的文件选择框
+  // 7. 点击导入唤起隐藏的文件选择框
   importFileBtn.addEventListener('click', () => fileInput.click());
 
   fileInput.addEventListener('change', (e) => {
@@ -159,7 +194,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     reader.readAsText(file);
   });
 
-  // 7. 导出当前配置为本地 JSON
+  // 8. 导出当前配置为本地 JSON
   exportFileBtn.addEventListener('click', async () => {
     const { ruleConfig } = await chrome.storage.local.get(['ruleConfig']);
     const blob = new Blob([JSON.stringify(ruleConfig, null, 2)], { type: 'application/json' });
@@ -172,7 +207,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     showMsg('规则已导出到本地下载目录', 'success');
   });
 
-  // 8. 远程拉取
+  // 9. 远程拉取
   syncRemoteBtn.addEventListener('click', () => {
     const remoteUrl = syncUrlInput.value.trim();
     if (!remoteUrl) {

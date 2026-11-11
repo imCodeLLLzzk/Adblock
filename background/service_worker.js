@@ -3,13 +3,16 @@
  * 统一管理：规则存储、DNR 拦截规则、内容脚本动态注册、消息路由
  */
 
-const RULE_ID_BASE = 2000;        // 拦截规则 ID 段
+const RULE_ID_BASE = 2000;         // 拦截规则 ID 段
 const CONTENT_SCRIPT_IDS = ['shield-main-world', 'shield-isolated-world'];
 const TOP_DOMAIN_PROBE_ID = 9000;  // 能力探测用的临时规则 ID
-const BLOCK_RESOURCE_TYPES = ['script', 'xmlhttprequest', 'sub_frame', 'image', 'media', 'font', 'stylesheet', 'ping'];
+const BLOCK_RESOURCE_TYPES = [
+  'script', 'xmlhttprequest', 'sub_frame', 'image', 'media',
+  'font', 'stylesheet', 'ping', 'object'
+];
 
 const DEFAULT_CONFIG = {
-  version: "1.1.0",
+  version: "1.1.1",
   networkRules: [
     "*://*.doubleclick.net/*",
     "*://*.googlesyndication.com/*",
@@ -31,54 +34,160 @@ const DEFAULT_CONFIG = {
       ]
     }
   },
-  remoteSyncUrl: ""
+  remoteSyncUrl: "",
+  antiOverlay: {
+    signatures: [],
+    selectors: [],
+    structural: true
+  }
 };
+
+// ---------- 通用工具 ----------
+
+function uniqueStrings(list) {
+  return [...new Set((Array.isArray(list) ? list : [])
+    .filter(s => typeof s === 'string' && s.trim())
+    .map(s => s.trim()))];
+}
+
+// 域名归一化：兼容 "https://*.Example.com:443/path" 这类脏输入。
+// DNR 的 excludedInitiatorDomains / excludedTopDomains 不接受通配符，
+// 一条非法域名会导致整批规则被拒绝（全盘失效），因此必须严格清洗。
+function normalizeDomain(domain) {
+  if (typeof domain !== 'string') return '';
+  let d = domain.trim().toLowerCase();
+  if (!d) return '';
+  d = d.replace(/^[a-z][a-z0-9+.-]*:\/\//, '');
+  d = d.split('/')[0].split('?')[0].split('#')[0];
+  d = d.split(':')[0];
+  d = d.replace(/^\*\./, '').replace(/^\.+/, '').replace(/\.+$/, '');
+  if (!/^[a-z0-9][a-z0-9.-]*$/.test(d)) return '';
+  if (!d.includes('.')) return '';   // 单段主机名（localhost 等）不做域名级规则
+  return d;
+}
+
+function normalizeDomains(list) {
+  return [...new Set((Array.isArray(list) ? list : []).map(normalizeDomain).filter(Boolean))];
+}
+
+// ---------- 配置校验与迁移 ----------
 
 // 宽松且健壮的格式容错校验器，自动补齐缺失字段并兼容历史命名
 function validateSchema(config) {
   if (!config || typeof config !== 'object' || Array.isArray(config)) return false;
 
-  // 1. 自动兼容并补齐 networkRules
+  // 1. networkRules
   if (!Array.isArray(config.networkRules)) {
     config.networkRules = [];
   }
-  config.networkRules = config.networkRules.filter(r => typeof r === 'string' && r.trim());
+  config.networkRules = uniqueStrings(config.networkRules);
 
   // 2. 兼容 cosmetics 字段命名差异（兼容 cosmeticRules 或 cosmetics）
   if (!config.cosmetics && config.cosmeticRules) {
     config.cosmetics = config.cosmeticRules;
   }
-  if (!config.cosmetics || typeof config.cosmetics !== 'object') {
+  if (!config.cosmetics || typeof config.cosmetics !== 'object' || Array.isArray(config.cosmetics)) {
     config.cosmetics = { global: [], domains: {} };
   }
   if (!Array.isArray(config.cosmetics.global)) {
     config.cosmetics.global = [];
   }
-  config.cosmetics.global = config.cosmetics.global.filter(s => typeof s === 'string' && s.trim());
+  config.cosmetics.global = uniqueStrings(config.cosmetics.global);
 
-  if (!config.cosmetics.domains || typeof config.cosmetics.domains !== 'object') {
+  if (!config.cosmetics.domains || typeof config.cosmetics.domains !== 'object'
+    || Array.isArray(config.cosmetics.domains)) {
     config.cosmetics.domains = {};
   }
-  // 清理 domains 内部结构，保证每个值都是选择器数组
-  for (const [domain, selectors] of Object.entries(config.cosmetics.domains)) {
-    if (!Array.isArray(selectors)) {
-      config.cosmetics.domains[domain] = [];
-    } else {
-      config.cosmetics.domains[domain] = selectors.filter(s => typeof s === 'string' && s.trim());
-    }
+  // 域名键统一归一化，选择器去重
+  const domains = {};
+  for (const [rawDomain, selectors] of Object.entries(config.cosmetics.domains)) {
+    const d = normalizeDomain(rawDomain);
+    if (!d) continue;
+    const list = uniqueStrings(Array.isArray(selectors) ? selectors : []);
+    domains[d] = uniqueStrings([...(domains[d] || []), ...list]);
+  }
+  config.cosmetics.domains = domains;
+
+  if (typeof config.version !== 'string' || !config.version.trim()) {
+    config.version = DEFAULT_CONFIG.version;
+  }
+  if (typeof config.remoteSyncUrl !== 'string') {
+    config.remoteSyncUrl = '';
   }
 
-  if (typeof config.version !== 'string') {
-    config.version = DEFAULT_CONFIG.version;
+  // 3. 反检测蒙版配置（signatures 追加特征词，selectors 强制隐藏遮罩）
+  if (!config.antiOverlay || typeof config.antiOverlay !== 'object' || Array.isArray(config.antiOverlay)) {
+    config.antiOverlay = {};
+  }
+  if (!Array.isArray(config.antiOverlay.signatures)) {
+    config.antiOverlay.signatures = [];
+  }
+  config.antiOverlay.signatures = uniqueStrings(config.antiOverlay.signatures);
+  if (!Array.isArray(config.antiOverlay.selectors)) {
+    config.antiOverlay.selectors = [];
+  }
+  config.antiOverlay.selectors = uniqueStrings(config.antiOverlay.selectors);
+  if (typeof config.antiOverlay.structural !== 'boolean') {
+    config.antiOverlay.structural = true;
   }
 
   return true;
 }
 
-// 读取当前被白名单放行的域名列表
-async function getWhitelistedDomains() {
-  const { siteConfigs = {} } = await chrome.storage.local.get(['siteConfigs']);
-  return Object.keys(siteConfigs).filter(domain => siteConfigs[domain]?.whitelisted);
+// ---------- DNR 拦截规则 ----------
+
+// 探测当前 Chrome 是否支持 excludedTopDomains（较新版本才有）。
+// 未支持时写入该字段会让整批规则校验失败，必须提前探测。
+// 探测结果在本次 Service Worker 生命周期内缓存。
+let _topDomainsProbe = null;
+function supportsExcludedTopDomains() {
+  if (_topDomainsProbe) return _topDomainsProbe;
+  _topDomainsProbe = (async () => {
+    try {
+      await chrome.declarativeNetRequest.updateDynamicRules({
+        removeRuleIds: [TOP_DOMAIN_PROBE_ID],
+        addRules: [{
+          id: TOP_DOMAIN_PROBE_ID,
+          priority: 1,
+          action: { type: 'block' },
+          condition: {
+            // .invalid 是 RFC 2606 保留顶级域，现实中不存在，不会误伤真实请求
+            urlFilter: '||shield-probe.invalid^',
+            excludedTopDomains: ['probe.invalid']
+          }
+        }]
+      });
+      return true;
+    } catch (e) {
+      return false;
+    } finally {
+      // 无论成功与否都清理探针规则，避免污染实际规则集
+      try {
+        await chrome.declarativeNetRequest.updateDynamicRules({
+          removeRuleIds: [TOP_DOMAIN_PROBE_ID]
+        });
+      } catch (e) { /* 忽略清理失败 */ }
+    }
+  })();
+  return _topDomainsProbe;
+}
+
+// 下发规则：整批失败时退化为逐条下发，跳过非法规则而不是全军覆没
+async function commitRules(removeRuleIds, addRules) {
+  try {
+    await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds, addRules });
+    return;
+  } catch (err) {
+    console.warn('[Shield] 批量下发规则失败，转逐条下发:', err && err.message);
+  }
+  await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds });
+  for (const rule of addRules) {
+    try {
+      await chrome.declarativeNetRequest.updateDynamicRules({ addRules: [rule] });
+    } catch (err) {
+      console.warn('[Shield] 已跳过非法规则', rule.id, err && err.message);
+    }
+  }
 }
 
 // 同步底层 declarativeNetRequest 拦截规则
@@ -86,90 +195,60 @@ async function getWhitelistedDomains() {
 // 关键点：DNR 的 urlFilter 匹配的是「请求的目标 URL」，而白名单域名是「发起请求的页面」。
 // 两者不是同一个域名，因此不能用 allow 规则去覆盖 —— 必须让拦截规则在白名单页面
 // 上直接不生效：
-//   excludedTopDomains       匹配顶层页面域名，跨域 iframe 内的广告同样被放行（Chrome 145+）
-//   excludedInitiatorDomains 匹配请求发起方域名，兼容 Chrome 101~144
+//   excludedTopDomains       匹配顶层页面域名，跨域 iframe 内的广告同样被放行（较新 Chrome）
+//   excludedInitiatorDomains 匹配请求发起方域名，兼容旧版本 Chrome
 // 两条同时写入，保证在所有 Chrome 版本上都能放行。
-async function applyNetworkRules(networkRules, whitelistedDomains) {
+async function applyNetworkRules(networkRules, whitelistedDomains, enabled = true) {
+  // 先做能力探测，再读取动态规则列表，避免探针规则残留进待删除集合
+  const supportsTopDomains = await supportsExcludedTopDomains();
+
   const currentRules = await chrome.declarativeNetRequest.getDynamicRules();
   const removeRuleIds = currentRules.map(r => r.id);
+  if (!removeRuleIds.includes(TOP_DOMAIN_PROBE_ID)) {
+    removeRuleIds.push(TOP_DOMAIN_PROBE_ID);
+  }
 
-  const excluded = (whitelistedDomains || []).map(domain => domain.toLowerCase());
+  const excluded = normalizeDomains(whitelistedDomains);
+  const patterns = enabled ? uniqueStrings(networkRules) : [];
 
-  // Chrome 145+ 才认识 excludedTopDomains，写到旧版本上会导致整批规则被拒绝，
-  // 因此按版本能力裁剪条件字段
-  const supportsTopDomains = supportsExcludedTopDomains();
-
-  const blockRules = (networkRules || []).map((pattern, index) => ({
-    id: RULE_ID_BASE + index,
-    priority: 1,
-    action: { type: "block" },
-    condition: {
+  const blockRules = patterns.map((pattern, index) => {
+    const condition = {
       urlFilter: pattern,
-      resourceTypes: BLOCK_RESOURCE_TYPES,
-      // 白名单放行：
-      // excludedTopDomains       匹配顶层页面域名，跨域 iframe 内的广告同样被放行
-      // excludedInitiatorDomains 匹配请求发起方域名
-      ...(excluded.length ? {
-        ...(supportsTopDomains ? { excludedTopDomains: excluded } : {}),
-        excludedInitiatorDomains: excluded
-      } : {})
+      resourceTypes: BLOCK_RESOURCE_TYPES
+    };
+    if (excluded.length) {
+      if (supportsTopDomains) condition.excludedTopDomains = excluded;
+      condition.excludedInitiatorDomains = excluded;
     }
-  }));
-
-  await chrome.declarativeNetRequest.updateDynamicRules({
-    removeRuleIds,
-    addRules: blockRules
+    return {
+      id: RULE_ID_BASE + index,
+      priority: 1,
+      action: { type: 'block' },
+      condition
+    };
   });
+
+  await commitRules(removeRuleIds, blockRules);
 }
 
-// 探测当前 Chrome 是否支持 excludedTopDomains（Chrome 145+）
-// 用一条永远不可能被真实请求命中的探针规则提交，失败即视为不支持。
-// 探测结果在本次 Service Worker 生命周期内缓存。
-let _supportsTopDomains = null;
-async function supportsExcludedTopDomains() {
-  if (_supportsTopDomains !== null) return _supportsTopDomains;
+// ---------- 内容脚本动态注册 ----------
 
-  try {
-    await chrome.declarativeNetRequest.updateDynamicRules({
-      removeRuleIds: [TOP_DOMAIN_PROBE_ID],
-      addRules: [{
-        id: TOP_DOMAIN_PROBE_ID,
-        priority: 1,
-        action: { type: "block" },
-        condition: {
-          // .invalid 是 RFC 2606 保留顶级域，现实中不存在
-          urlFilter: "||shield-probe.invalid^",
-          excludedTopDomains: ["probe.invalid"]
-        }
-      }]
-    });
-    _supportsTopDomains = true;
-  } catch (e) {
-    _supportsTopDomains = false;
+// 生成 excludeMatches：同时覆盖裸域名与子域名
+// Chrome 的 match pattern 中 `*.example.com` 只匹配子域，不匹配 example.com 本身，
+// 与 DNR 的 excluded*Domains（含子域）语义保持一致。
+function buildExcludeMatches(domains) {
+  const out = [];
+  for (const d of normalizeDomains(domains)) {
+    out.push(`*://${d}/*`, `*://*.${d}/*`);
   }
-
-  // 无论成功与否都清理探针规则，避免污染实际规则集
-  try {
-    await chrome.declarativeNetRequest.updateDynamicRules({
-      removeRuleIds: [TOP_DOMAIN_PROBE_ID]
-    });
-  } catch (e) { /* 忽略清理失败 */ }
-
-  return _supportsTopDomains;
+  return [...new Set(out)];
 }
 
-// 动态注册内容脚本：白名单域名直接通过 excludeMatches 排除，
-// 主世界脚本与隔离世界脚本同时生效/同时失效，无需等待异步读取
-async function applyContentScripts(whitelistedDomains) {
-  const excludeMatches = (whitelistedDomains || []).map(domain => `*://*.${domain}/*`);
+async function applyContentScripts(whitelistedDomains, disabled = false) {
+  // 全局关闭时排除所有页面，等价于不注入任何脚本
+  const excludeMatches = disabled ? ['*://*/*'] : buildExcludeMatches(whitelistedDomains);
 
-  const existing = await chrome.scripting.getRegisteredContentScripts();
-  const staleIds = existing.map(s => s.id).filter(id => CONTENT_SCRIPT_IDS.includes(id));
-  if (staleIds.length) {
-    await chrome.scripting.unregisterContentScripts({ ids: staleIds });
-  }
-
-  await chrome.scripting.registerContentScripts([
+  const definitions = [
     {
       id: CONTENT_SCRIPT_IDS[0],
       js: ['scripts/main_world_hook.js'],
@@ -188,27 +267,64 @@ async function applyContentScripts(whitelistedDomains) {
       world: 'ISOLATED',
       persistAcrossSessions: true
     }
-  ]);
+  ];
+
+  const existing = await chrome.scripting.getRegisteredContentScripts();
+  const existingIds = new Set(existing.map(s => s.id));
+  const missing = definitions.filter(d => !existingIds.has(d.id));
+
+  if (missing.length) {
+    await chrome.scripting.registerContentScripts(missing);
+  }
+
+  // 用 update 原地改写，避免 unregister + register 的异步竞态
+  // （旧实现会出现 "Cannot register script with duplicate id"）
+  try {
+    await chrome.scripting.updateContentScripts(definitions);
+  } catch (err) {
+    console.warn('[Shield] 更新内容脚本失败，改为重新注册:', err && err.message);
+    await chrome.scripting.unregisterContentScripts({ ids: CONTENT_SCRIPT_IDS });
+    await chrome.scripting.registerContentScripts(definitions);
+  }
 }
 
-// 全量同步：配置 → 拦截规则 → 内容脚本注册
-async function syncAll() {
-  const { ruleConfig, siteConfigs = {} } = await chrome.storage.local.get(['ruleConfig', 'siteConfigs']);
-  const config = ruleConfig || DEFAULT_CONFIG;
-  const whitelistedDomains = Object.keys(siteConfigs).filter(d => siteConfigs[d]?.whitelisted);
+// ---------- 全量同步 ----------
 
-  await applyNetworkRules(config.networkRules, whitelistedDomains);
-  await applyContentScripts(whitelistedDomains);
+async function syncAll() {
+  const { ruleConfig, siteConfigs = {}, globalEnabled = true } =
+    await chrome.storage.local.get(['ruleConfig', 'siteConfigs', 'globalEnabled']);
+
+  const config = ruleConfig && validateSchema(ruleConfig) ? ruleConfig : DEFAULT_CONFIG;
+  const whitelistedDomains = normalizeDomains(
+    Object.keys(siteConfigs).filter(d => siteConfigs[d]?.whitelisted)
+  );
+  const enabled = globalEnabled !== false;
+
+  await applyNetworkRules(config.networkRules, whitelistedDomains, enabled);
+  await applyContentScripts(whitelistedDomains, !enabled);
 }
 
 // 设置单个域名的拦截开关
 async function setSiteWhitelist(hostname, whitelisted) {
-  if (!hostname) throw new Error('缺少域名');
+  const domain = normalizeDomain(hostname);
+  if (!domain) throw new Error('域名格式无效');
+
   const { siteConfigs = {} } = await chrome.storage.local.get(['siteConfigs']);
-  siteConfigs[hostname] = { whitelisted: !!whitelisted };
+  if (whitelisted) {
+    siteConfigs[domain] = { whitelisted: true };
+  } else {
+    delete siteConfigs[domain];
+  }
   await chrome.storage.local.set({ siteConfigs });
   await syncAll();
-  return { hostname, whitelisted: !!whitelisted };
+  return { hostname: domain, whitelisted: !!whitelisted };
+}
+
+// 全局总开关
+async function setGlobalEnabled(enabled) {
+  await chrome.storage.local.set({ globalEnabled: !!enabled });
+  await syncAll();
+  return { enabled: !!enabled };
 }
 
 // 远程拉取规则并热更新
@@ -228,19 +344,26 @@ async function syncRemoteRules(remoteUrl) {
   }
 }
 
+// ---------- 生命周期 ----------
+
 chrome.runtime.onInstalled.addListener(async () => {
-  const current = await chrome.storage.local.get(['ruleConfig']);
-  if (!current.ruleConfig) {
-    await chrome.storage.local.set({ ruleConfig: DEFAULT_CONFIG });
-  }
+  const current = await chrome.storage.local.get(['ruleConfig', 'globalEnabled']);
+  const config = current.ruleConfig && validateSchema(current.ruleConfig)
+    ? current.ruleConfig
+    : DEFAULT_CONFIG;
+  await chrome.storage.local.set({
+    ruleConfig: config,
+    globalEnabled: current.globalEnabled !== false
+  });
   await syncAll();
 });
 
 chrome.runtime.onStartup.addListener(() => {
-  syncAll();
+  syncAll().catch(err => console.warn('[Shield] 启动同步失败:', err && err.message));
 });
 
-// 处理 Popup 与 Content 的交互
+// ---------- 消息路由 ----------
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   // 导入本地 JSON 规则
   if (request.action === 'IMPORT_RULE_CONFIG') {
@@ -266,6 +389,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 
+  // 全局总开关
+  if (request.action === 'SET_GLOBAL_ENABLED') {
+    setGlobalEnabled(request.enabled)
+      .then(data => sendResponse({ success: true, ...data }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
   // 远程拉取规则
   if (request.action === 'SYNC_REMOTE_RULES') {
     syncRemoteRules(request.remoteUrl)
@@ -277,11 +408,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   // 内容脚本索取特定站点选择器
   if (request.action === 'GET_SELECTORS_FOR_DOMAIN') {
     chrome.storage.local.get(['ruleConfig'], ({ ruleConfig }) => {
-      const hostname = request.hostname;
+      const hostname = normalizeDomain(request.hostname);
       const cosmetics = ruleConfig?.cosmetics || ruleConfig?.cosmeticRules || {};
       const globalSelectors = cosmetics.global || [];
       const domainSelectors = cosmetics.domains?.[hostname] || [];
-      sendResponse({ selectors: [...globalSelectors, ...domainSelectors] });
+      sendResponse({ selectors: uniqueStrings([...globalSelectors, ...domainSelectors]) });
     });
     return true;
   }
