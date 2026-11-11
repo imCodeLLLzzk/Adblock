@@ -11,6 +11,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const exportFileBtn = document.getElementById('exportFileBtn');
   const fileInput = document.getElementById('fileInput');
   const syncMsg = document.getElementById('syncMsg');
+  const whitelistList = document.getElementById('whitelistList');
 
   // 1. 获取当前活跃标签页
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -36,28 +37,100 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (config.version) ruleVersionEl.textContent = `v${config.version}`;
     if (config.remoteSyncUrl) syncUrlInput.value = config.remoteSyncUrl;
 
+    // 规则总数 = 网络拦截规则 + 全局元素规则 + 站点专属元素规则
     const netCount = config.networkRules?.length || 0;
-    const globalCosmetic = config.cosmeticRules?.global?.length || 0;
-    totalRulesCount.textContent = `${netCount + globalCosmetic} 条`;
+    const cosmetics = config.cosmetics || config.cosmeticRules || {};
+    const globalCosmetic = cosmetics.global?.length || 0;
+    const domainCosmetic = Object.values(cosmetics.domains || {})
+      .reduce((sum, arr) => sum + (Array.isArray(arr) ? arr.length : 0), 0);
+    totalRulesCount.textContent = `${netCount + globalCosmetic + domainCosmetic} 条`;
 
     if (data.stats?.totalBlocked) {
       totalBlockedCount.textContent = data.stats.totalBlocked.toLocaleString();
     }
+
+    renderWhitelist(configs);
+  }
+
+  // 3. 渲染已关闭拦截的域名列表
+  function renderWhitelist(configs) {
+    if (!whitelistList) return;
+    const domains = Object.keys(configs).filter(d => configs[d]?.whitelisted);
+
+    whitelistList.innerHTML = '';
+    if (!domains.length) {
+      const empty = document.createElement('div');
+      empty.className = 'whitelist-empty';
+      empty.textContent = '暂无已关闭的域名';
+      whitelistList.appendChild(empty);
+      return;
+    }
+
+    domains.forEach(domain => {
+      const row = document.createElement('div');
+      row.className = 'whitelist-item';
+
+      const name = document.createElement('span');
+      name.className = 'whitelist-domain';
+      name.textContent = domain;
+
+      const restore = document.createElement('button');
+      restore.className = 'whitelist-restore';
+      restore.textContent = '恢复';
+      restore.addEventListener('click', async () => {
+        await sendToggle(domain, false);
+        refreshUI();
+      });
+
+      row.appendChild(name);
+      row.appendChild(restore);
+      whitelistList.appendChild(row);
+    });
+  }
+
+  // 4. 向后台发送域名开关指令
+  function sendToggle(domain, whitelisted) {
+    return new Promise(resolve => {
+      chrome.runtime.sendMessage({
+        action: 'SET_SITE_WHITELIST',
+        hostname: domain,
+        whitelisted
+      }, (res) => {
+        if (chrome.runtime.lastError) {
+          showMsg(`操作失败: ${chrome.runtime.lastError.message}`, 'error');
+          resolve(false);
+          return;
+        }
+        if (!res?.success) {
+          showMsg(`操作失败: ${res?.error || '未知错误'}`, 'error');
+          resolve(false);
+          return;
+        }
+        showMsg(whitelisted ? `已对 ${domain} 关闭拦截` : `已对 ${domain} 恢复拦截`, 'success');
+        resolve(true);
+      });
+    });
   }
 
   await refreshUI();
 
-  // 3. 切换当前站点过滤状态
+  // 5. 切换当前站点过滤状态
   siteToggle.addEventListener('change', async () => {
+    if (!hostname) return;
     const enabled = siteToggle.checked;
     updateStatusBadge(enabled);
-    const { siteConfigs = {} } = await chrome.storage.local.get(['siteConfigs']);
-    siteConfigs[hostname] = { whitelisted: !enabled };
-    await chrome.storage.local.set({ siteConfigs });
+
+    const ok = await sendToggle(hostname, !enabled);
+    if (!ok) {
+      siteToggle.checked = !enabled;
+      updateStatusBadge(!enabled);
+      return;
+    }
+    // 内容脚本按域名动态注册，需重载当前页生效
     if (tab?.id) chrome.tabs.reload(tab.id);
   });
 
-  // 4. 点击导入唤起隐藏的文件选择框
+  // 6. 点击导入唤起隐藏的文件选择框
   importFileBtn.addEventListener('click', () => fileInput.click());
 
   fileInput.addEventListener('change', (e) => {
@@ -86,7 +159,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     reader.readAsText(file);
   });
 
-  // 5. 导出当前配置为本地 JSON
+  // 7. 导出当前配置为本地 JSON
   exportFileBtn.addEventListener('click', async () => {
     const { ruleConfig } = await chrome.storage.local.get(['ruleConfig']);
     const blob = new Blob([JSON.stringify(ruleConfig, null, 2)], { type: 'application/json' });
@@ -99,7 +172,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     showMsg('规则已导出到本地下载目录', 'success');
   });
 
-  // 6. 远程拉取
+  // 8. 远程拉取
   syncRemoteBtn.addEventListener('click', () => {
     const remoteUrl = syncUrlInput.value.trim();
     if (!remoteUrl) {

@@ -314,3 +314,54 @@ input[type="text"]:focus {
 }
 .sync-msg.success { color: var(--success-color); }
 .sync-msg.error { color: #ef4444; }
+/* 已关闭拦截的域名列表 */
+.whitelist-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.whitelist-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 5px 8px;
+}
+
+.whitelist-domain {
+  font-size: 11px;
+  color: var(--text-main);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.whitelist-restore {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 2px 8px;
+  color: var(--text-secondary);
+  font-size: 10px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.whitelist-restore:hover {
+  border-color: var(--accent-color);
+  color: var(--accent-color);
+}
+
+.whitelist-empty {
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-align: center;
+  padding: 6px 0;
+}

@@ -5,9 +5,9 @@
 Shield Minimal is a Chrome MV3 extension with **no build step and no npm dependencies** — the working tree *is* the artifact, loaded via `chrome://extensions` → *Load unpacked*.
 
 - `manifest.json` — MV3 manifest: DNR permissions, service worker, popup, two content scripts (`MAIN` and `ISOLATED` worlds).
-- `background/service_worker.js` — owns `chrome.storage.local` state (`ruleConfig`, `siteConfigs`, `stats`), turns URL patterns into `declarativeNetRequest` dynamic rules, answers popup messages.
+- `background/service_worker.js` — owns `chrome.storage.local` state (`ruleConfig`, `siteConfigs`), turns URL patterns into `declarativeNetRequest` dynamic rules, registers content scripts dynamically with per-domain `excludeMatches`, and answers popup messages.
 - `popup/popup.html` / `.css` / `.js` — toolbar panel: per-site toggle, blocked counters, JSON import/export, remote sync.
-- `scripts/main_world_hook.js` — `document_start` in the `MAIN` world: stubs ad globals, patches `window.open`, defuses click-hijack overlays.
+- `scripts/main_world_hook.js` — `document_start` in the `MAIN` world: stubs ad globals, patches `window.open`, defuses click-hijack overlays. Registered dynamically by the background, so it cannot read `chrome.storage`.
 - `scripts/content_isolated.js` — `ISOLATED` world cosmetic filtering; injects a `display:none` stylesheet for ad containers.
 - `icons/` — 16/48/128 px PNGs referenced by the manifest.
 
@@ -48,4 +48,4 @@ PRs should state the user-visible effect, list manual verification steps, and in
 
 ## Known Gaps
 
-`SYNC_REMOTE_RULES` is sent by the popup but unhandled in the background; `stats` and `globalEnabled` are read but never written; `GET_SELECTORS_FOR_DOMAIN` is never called. Resolve these before building on them.
+`stats` is read by the popup but never written, so the blocked counter stays at zero; `globalEnabled` is read by the content script but has no UI to write it; `GET_SELECTORS_FOR_DOMAIN` is served by the background but the content script reads `ruleConfig` directly instead. Resolve these before building on them.

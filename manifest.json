@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Shield Minimal",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "High-performance, anti-detection personal ad blocker",
   "icons": {
     "16": "icons/icon16.png",
@@ -29,19 +29,5 @@
       "48": "icons/icon48.png",
       "128": "icons/icon128.png"
     }
-  },
-  "content_scripts": [
-    {
-      "matches": ["<all_urls>"],
-      "js": ["scripts/main_world_hook.js"],
-      "run_at": "document_start",
-      "world": "MAIN"
-    },
-    {
-      "matches": ["<all_urls>"],
-      "js": ["scripts/content_isolated.js"],
-      "run_at": "document_start",
-      "world": "ISOLATED"
-    }
-  ]
+  }
 }
